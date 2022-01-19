@@ -1,0 +1,11 @@
+from cvplibrary import CVPGlobalVariables, GlobalVariableNames
+
+labels = CVPGlobalVariables.getValue(GlobalVariableNames.CVP_SYSTEM_LABELS)
+
+
+for item in labels:
+  key, value = item.split(':')
+  if key == 'hostname':
+    hostname = value
+    
+print(hostname)
