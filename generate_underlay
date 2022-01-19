@@ -1,0 +1,239 @@
+from cvplibrary import CVPGlobalVariables, GlobalVariableNames
+from cvplibrary import RestClient
+import ssl
+import yaml
+
+labels = CVPGlobalVariables.getValue(GlobalVariableNames.CVP_SYSTEM_LABELS)
+
+
+for item in labels:
+  key, value = item.split(':')
+  if key == 'hostname':
+    hostname = value
+    
+
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
+configlet = 'underlay_yaml'
+
+cvp_url = 'https://192.168.0.5/cvpservice/'
+
+client= RestClient(cvp_url+'configlet/getConfigletByName.do?name='+configlet,'GET')
+
+if client.connect():
+  raw = yaml.load(client.getResponse())
+  
+
+underlay = yaml.safe_load(raw['config'])
+
+mtu = underlay['global']['MTU']
+
+def gen_interface():
+  for interface in underlay[hostname]['interfaces']:
+    ip = underlay[hostname]['interfaces'][interface]['ipv4']
+    mask = underlay[hostname]['interfaces'][interface]['mask']
+    print("interface %s") % interface
+    print("   ip address %s/%s") % (str(ip), str(mask))
+    if 'Ethernet' in interface:
+      print("   no switchport")
+      print("   mtu %s") % mtu
+    
+MLAG_Left = """
+no spanning-tree vlan-id 4094
+
+vlan 4094
+  trunk group MLAG-Peer
+  
+interface e1
+  channel-group 10 mode active
+interface e2  
+  channel-group 10 mode active
+
+interface vlan 4094
+  ip address 192.168.255.1/30
+  no autostate
+  
+interface po10
+  description MLAG Peer Link
+  switchport mode trunk
+  switchport trunk group MLAG-Peer
+  
+mlag configuration 
+  domain-id MLAG
+  local-interface Vlan4094
+  peer-address 192.168.255.2
+  peer-link port-channel10
+"""
+
+MLAG_Right = """
+no spanning-tree vlan-id 4094
+
+vlan 4094
+  trunk group MLAG-Peer
+  
+interface e1
+  channel-group 10 mode active
+interface e2  
+  channel-group 10 mode active
+
+interface vlan 4094
+  ip address 192.168.255.2/30
+  no autostate
+  
+interface po10
+  description MLAG Peer Link
+  switchport mode trunk
+  switchport trunk group MLAG-Peer
+    
+mlag configuration 
+  domain-id MLAG
+  local-interface Vlan4094
+  peer-address 192.168.255.1
+  peer-link port-channel10
+"""
+
+ip_route_map = """
+ip prefix-list LOOPBACK
+    seq 10 permit 192.168.101.0/24 eq 32
+    seq 11 permit 192.168.102.0/24 eq 32
+    seq 12 permit 192.168.201.0/24 eq 32
+    seq 13 permit 192.168.202.0/24 eq 32
+    seq 14 permit 192.168.253.0/24 eq 32
+
+
+route-map LOOPBACK permit 10
+   match ip address prefix-list LOOPBACK
+"""
+
+peer_filter = """
+peer-filter LEAF-AS-RANGE
+ 10 match as-range 65000-65535 result accept
+"""
+def gen_leaf_EVPN():
+   
+  # print("service routing protocols model multi-agent")
+  print(ip_route_map)
+  print(peer_filter)
+  ASN = underlay[hostname]['BGP']['ASN']
+  lo0 = underlay[hostname]['interfaces']['loopback0']['ipv4']
+
+  print("router bgp %s") % ASN
+  print("  router-id %s") % lo0
+  print("  no bgp default ipv4-unicast")
+  print("  maximum-paths 3")
+  print("  distance bgp 20 200 200")
+  spine_ASN = underlay[hostname]['BGP']['spine-ASN']
+
+
+  print("  neighbor Underlay peer group")
+  print("  neighbor Underlay remote-as %s") % spine_ASN
+  print("  neighbor Underlay send-community")
+  print("  neighbor Underlay maximum-routes 12000")
+  print("  neighbor Underlay update-source Loopback0")
+
+  print("  neighbor LEAF_Peer peer group")
+  print("  neighbor LEAF_Peer remote-as %s") % ASN
+  print("  neighbor LEAF_Peer next-hop-self")
+  print("  neighbor LEAF_Peer maximum-routes 12000")
+  for peer in underlay[hostname]['BGP']['spine-peers']:
+    print("  neighbor %s peer group Underlay") % peer
+  
+  if underlay[hostname]['MLAG'] == "Odd":
+    print("  neighbor 192.168.255.2 peer group LEAF_Peer")
+  if underlay[hostname]['MLAG'] == "Even":
+    print("  neighbor 192.168.255.1 peer group LEAF_Peer")
+   
+
+
+  print("  redistribute connected route-map LOOPBACK")  
+    
+  print("  neighbor EVPN peer group")
+  print("  neighbor EVPN remote-as %s") % spine_ASN
+  print("  neighbor EVPN update-source Loopback0")
+  print("  neighbor EVPN ebgp-multihop")
+  print("  neighbor EVPN send-community")
+  print("  neighbor EVPN maximum-routes 0")
+  
+  if 'DC1' in hostname: 
+    for evpn_peer in underlay['global']['DC1']['spine_peers']:
+      print("  neighbor %s peer group EVPN") % evpn_peer
+
+  if 'DC2' in hostname: 
+    for evpn_peer in underlay['global']['DC2']['spine_peers']:
+      print("  neighbor %s peer group EVPN") % evpn_peer
+ 
+    
+  print("  address-family evpn")
+  print("     neighbor EVPN activate")
+   
+  print("  address-family ipv4")
+  print("    neighbor Underlay activate")
+  print("    neighbor LEAF_Peer activate")
+  
+  if underlay[hostname]['MLAG'] == "Odd":
+    print(MLAG_Left)
+  if underlay[hostname]['MLAG'] == "Even":
+    print(MLAG_Right)
+  
+def gen_spine_EVPN(): 
+  
+  # print("service routing protocols model multi-agent")
+  print(ip_route_map)
+  print(peer_filter)
+  ASN = underlay[hostname]['BGP']['ASN']
+  lo0 = underlay[hostname]['interfaces']['loopback0']['ipv4']
+
+  print("router bgp %s") % ASN
+  print("  router-id %s") % lo0
+  print("  no bgp default ipv4-unicast")
+  print("  maximum-paths 3")
+  print("  distance bgp 20 200 200")
+
+  if 'DC1' in hostname:
+    range = underlay['global']['DC1']['p2p']
+    print("  bgp listen range %s peer-group LEAF_Underlay peer-filter LEAF-AS-RANGE") % range
+  if 'DC2' in hostname:
+    range = underlay['global']['DC2']['p2p']
+    print("  bgp listen range %s peer-group LEAF_Underlay peer-filter LEAF-AS-RANGE") % range
+      
+  print("  neighbor LEAF_Underlay peer group")
+  print("  neighbor LEAF_Underlay send-community")
+  print("  neighbor LEAF_Underlay maximum-routes 12000")
+  print("  redistribute connected route-map LOOPBACK")
+
+  print("  neighbor EVPN peer group")
+
+  if 'DC1' in hostname:
+    range = underlay['global']['DC1']['lo0']
+    print("  bgp listen range %s peer-group EVPN peer-filter LEAF-AS-RANGE") % range
+  if 'DC2' in hostname:
+    range = underlay['global']['DC2']['lo0']
+    print("  bgp listen range %s peer-group EVPN peer-filter LEAF-AS-RANGE") % range
+ 
+  print("  neighbor EVPN update-source Loopback0")
+  print("  neighbor EVPN ebgp-multihop 3")
+  print("  neighbor EVPN send-community")
+  print("  neighbor EVPN maximum-routes 0")
+
+
+  print("  address-family evpn")
+  print("    neighbor EVPN activate")
+ 
+  print("  address-family ipv4")
+  print("    neighbor LEAF_Underlay activate")
+
+  
+
+gen_interface()
+
+if 'spine' in hostname:
+  gen_spine_EVPN()
+if 'leaf' in hostname:
+  gen_leaf_EVPN()
+
+
+
+
+
+
