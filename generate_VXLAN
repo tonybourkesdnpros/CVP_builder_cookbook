@@ -1,0 +1,107 @@
+from cvplibrary import CVPGlobalVariables, GlobalVariableNames
+from cvplibrary import RestClient
+import ssl
+import yaml
+
+labels = CVPGlobalVariables.getValue(GlobalVariableNames.CVP_SYSTEM_LABELS)
+
+
+for item in labels:
+  key, value = item.split(':')
+  if key == 'hostname':
+    hostname = value
+    
+
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
+configlet = 'underlay_yaml'
+
+cvp_url = 'https://192.168.0.5/cvpservice/'
+
+client= RestClient(cvp_url+'configlet/getConfigletByName.do?name='+configlet,'GET')
+
+if client.connect():
+  raw = yaml.load(client.getResponse())
+  
+
+underlay = yaml.safe_load(raw['config'])
+
+configlet = 'VXLAN_yaml'
+
+cvp_url = 'https://192.168.0.5/cvpservice/'
+
+client= RestClient(cvp_url+'configlet/getConfigletByName.do?name='+configlet,'GET')
+
+if client.connect():
+  raw = yaml.load(client.getResponse())
+  
+VXLAN = yaml.safe_load(raw['config'])
+
+print("ip virtual-router mac-address 001c.7300.0099")
+
+def config_VRF():
+  for tenant in VXLAN['Tenants']:
+    print("vrf instance %s") % tenant
+    print("ip routing vrf %s") % tenant
+
+config_VRF()
+
+def config_VLAN():
+  for tenant in VXLAN['Tenants']:
+    for L2VNI in VXLAN['Tenants'][tenant]['L2VNI']:
+      VLAN_ID = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["VLANID"]
+      print("vlan %s") % VLAN_ID
+      
+config_VLAN()
+
+def config_SVI():
+   for tenant in VXLAN['Tenants']:
+    for L2VNI in VXLAN['Tenants'][tenant]['L2VNI']:
+      VLAN_ID = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["VLANID"]
+      SVI = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["SVI"]
+      print("interface vlan %s") % VLAN_ID
+      print("  vrf %s") % tenant
+      print("  ip address virtual %s") % SVI
+      
+config_SVI()
+
+
+def config_vxlan1():
+  print("interface vxlan1")
+  print("  vxlan source-interface loopback1")
+  for tenant in VXLAN['Tenants']:
+    L3VNI = VXLAN['Tenants'][tenant]['L3VNI']
+    print("  vxlan vrf %s vni %s") % (tenant, L3VNI)
+    for L2VNI in VXLAN['Tenants'][tenant]['L2VNI']:
+      VLAN_ID = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["VLANID"]
+      VNID = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["VNID"]
+      print("  vxlan vlan %s vni %s") % (VLAN_ID, VNID)
+
+  
+
+config_vxlan1()
+
+
+def config_BGP():
+  ASN = underlay[hostname]['BGP']['ASN']
+  lo0 = underlay[hostname]['interfaces']['loopback0']['ipv4']
+  print("router bgp %s") % ASN
+  for tenant in VXLAN['Tenants']:
+    L3VNI = VXLAN['Tenants'][tenant]['L3VNI']
+    print("  vrf %s") % tenant
+    print("    rd %s:%s") % (lo0, L3VNI)
+    print("    route-targe import evpn %s:%s") % (L3VNI, L3VNI)
+    print("    route-targe export evpn %s:%s") % (L3VNI, L3VNI)
+    for L2VNI in VXLAN['Tenants'][tenant]['L2VNI']:
+      VLAN_ID = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["VLANID"]
+      VNID = VXLAN['Tenants'][tenant]['L2VNI'][L2VNI]["VNID"]
+      print("  vlan %s") % VLAN_ID
+      print("    rd auto")
+      print("    route-target both %s:%s") % (VNID, VNID)
+      print("    redistribute learned") 
+
+config_BGP()
+
+
+
